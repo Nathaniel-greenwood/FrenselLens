@@ -24,20 +24,19 @@ import { HTMLMesh } from 'three/addons/interactive/HTMLMesh.js';
 import { InteractiveGroup } from 'three/addons/interactive/InteractiveGroup.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
-import { floor } from 'mathjs';
+// import { floor } from 'mathjs';
 
-let appName = 'SpiralFresnelFrenzy';
-let appDescription = 'the premier AR tool for simulating adaptive spiral Fresnel lenses';
+let appName = 'StepwiseAdaptiveFL';
+let appDescription = 'the premier AR tool for simulating stepwise adaptive Fresnel lenses';
 
-let qAFL = 1;	// the ratio of focal power and the angle between the two components (in radians)
+let qAFL = .1;	// the ratio of focal power and the angle between the two components (in radians)
 let deltaTheta = 10.0*Math.PI/180.0;	// angle by which components are rotated relative to each other (in radians)
 let deltaZ = 0.00001;
 let deltaZMin = 0.00001;
-let deltaX = 0.001;
-let deltaXMin = -1;
-let deltaY = 0.001;
-let deltaYMin = -1;
+let deltaX = 0;
+let deltaY = 0;
 let yXR = 1.5;
+let lensType = 0;	// 0 is the default lens, 1 is the Alvarez lens
 let show = 0;	// 0 = both parts, 1 = part 1, 2 = part 2, 3 = equivalent lens, 4 = None
 let windingFocussing = 1;	// 0 = None, 1 = Alvarez, 2 = separation (works for log. spiral only!)
 let RAPC = 0.5;	// in metres; if azimuthalPhaseCorrection = 2, no APC will be applied for R > RAPC + DeltaRAPC/2
@@ -85,7 +84,7 @@ let info;	// = document.createElement('div');
 
 let gui;
 let GUIParams;
-let showControl, spiralTypeControl, windingFocussingControl, azimuthalPhaseCorrectionControl, RAPCControl, DeltaRAPCControl, deltaZControl, backgroundControl, autofocusControl, focusDistanceControl;
+let lensControl, showControl, spiralTypeControl, windingFocussingControl, azimuthalPhaseCorrectionControl, RAPCControl, DeltaRAPCControl, deltaZControl, backgroundControl, autofocusControl, focusDistanceControl;
 // let folderComponents, folderBackground, folderVirtualCamera;
 
 
@@ -306,6 +305,15 @@ function updateUniforms() {
 	raytracingSphereShaderMaterial.uniforms.f1.value = f1;
 	raytracingSphereShaderMaterial.uniforms.qAFL.value = qAFL;
 
+	switch(lensType) {
+		case 0:
+			// Normal / Default lens
+			break;
+		case 1:
+			// Alvarez lens
+			break;
+	}
+
 	switch(show) {
 	case 1:	// part 1
 		raytracingSphereShaderMaterial.uniforms.visible1.value = true;
@@ -397,16 +405,15 @@ function updateUniforms() {
 
 	// if we are in vr mode, move the lenses up
 	if(renderer.xr.enabled && renderer.xr.isPresenting) {
-		raytracingSphereShaderMaterial.uniforms.c1.value.y = yXR + 0.5*deltaY;
-		raytracingSphereShaderMaterial.uniforms.c2.value.y = yXR - 0.5*deltaY;
+		raytracingSphereShaderMaterial.uniforms.c1.value.y += yXR;
+		raytracingSphereShaderMaterial.uniforms.c2.value.y += yXR;
 	}
 
 	let b2pi = raytracingSphereShaderMaterial.uniforms.period.value*2.0*Math.PI;
 	raytracingSphereShaderMaterial.uniforms.b2pi.value = b2pi;
 	raytracingSphereShaderMaterial.uniforms.nHalf.value = Math.log(0.5*(1. + Math.exp(b2pi)))/b2pi;
 
-	let equivalentLensF = calculateEquivalentLensF();
-	raytracingSphereShaderMaterial.uniforms.equivalentLensF.value = equivalentLensF;
+	raytracingSphereShaderMaterial.uniforms.equivalentLensPXY.value = calculateEquivalentLensPXY();
 
 	let aspectRatioBackground;
 	switch(background) {
@@ -571,13 +578,13 @@ function updateUniforms() {
 		// calculate "image distance" of the z plane containing the image of the background centre
 		// let i = o*equivalentLensF/(o-equivalentLensF);
 
-		// calculate the magnification of the image of the background centre, which is -(image distance)/(object distance)
-		let m;
-		if(equivalentLensF === Infinity) m = 1;
-		else m = equivalentLensF/(equivalentLensF - o);
+		// // calculate the magnification of the image of the background centre, which is -(image distance)/(object distance)
+		// let m;
+		// if(equivalentLensF === Infinity) m = 1;
+		// else m = equivalentLensF/(equivalentLensF - o);
 
-		// calculate the image of the background centre, making good use of the fact that the principal point of the lens is at the origin
-		let backgroundCentreImage = backgroundCentre.multiplyScalar(m);
+		// // calculate the image of the background centre, making good use of the fact that the principal point of the lens is at the origin
+		let backgroundCentreImage = backgroundCentre;	// .multiplyScalar(m);
 
 		// calculate the focus distance
 		let cp2bcPrime = new THREE.Vector3(0, 0, 0);	// the vector from the camera centre to the image of the background centre
@@ -670,7 +677,7 @@ function addRaytracingSphere() {
 			RAPC1: { value: (azimuthalPhaseCorrection == 2)?RAPC - 0.5*DeltaRAPC:Infinity },
 			showEquivalentLens: { value: false },
 			equivalentLensIdeal: { value: true },
-			equivalentLensF: { value: 1e10 },
+			equivalentLensPXY: { value: new THREE.Vector2(0, 0) },	// the x and y coordinates of the principal point of the equivalent lens in the xy plane
 			videoFeedUTexture: { value: videoFeedUTexture }, 
 			videoFeedETexture: { value: videoFeedETexture }, 
 			backgroundTexture: { value: textureEarthrise },
@@ -730,7 +737,7 @@ function addRaytracingSphere() {
 			uniform float RAPC1;	// if azimuthalPhaseCorrection == 2, this is the radius below which the azimuthal phase correction is turned on
 			uniform bool showEquivalentLens;
 			uniform bool equivalentLensIdeal;	// true if the equivalent lens is an ideal thin lens, false if it is a lens hologram
-			uniform float equivalentLensF;
+			uniform vec2 equivalentLensPXY;
 
 			// video feed from user-facing camera
 			uniform sampler2D videoFeedUTexture;
@@ -802,7 +809,7 @@ function addRaytracingSphere() {
 			// i.e. the vector from the principal point P to the intersection point I;
 			// f is the focal length;
 			// returns the outgoing light-ray direction
-			void lensDeflect(inout vec3 d, vec2 pixy, float f, bool idealLens) {
+			void lensDeflect(inout vec3 d, vec2 pixy, vec2 pxy, bool idealLens) {
 				if(idealLens) {
 					// ideal thin lens
 					// "normalise" the direction such that the magnitude of the z component is 1
@@ -810,13 +817,13 @@ function addRaytracingSphere() {
 
 					// the 3D deflected direction comprises the transverse components and a z component of magnitude 1
 					// and the same sign as d.z
-					d = vec3(d1.xy - pixy/f, d1.z);
+					d = vec3(d1.xy - pixy*pxy, d1.z);
 				} else {
 					// lens hologram
 					// normalise d
 					vec3 dN = d/length(d);
 					// transverse components of the outgoing light-ray direction
-					vec2 dxy = dN.xy - pixy/f;
+					vec2 dxy = dN.xy - pixy*pxy;
 	
 					// from the transverse direction, construct a 3D vector by setting the z component such that the length
 					// of the vector is 1
@@ -828,27 +835,25 @@ function addRaytracingSphere() {
 				return uPeriod*floor(u/uPeriod+0.5)*0.5;
 			}
 
+			float findLensletIndex(float u, float uPeriod) {
+				return floor(u/uPeriod+0.5);
+			}
 	
-			vec3 crossedLinearPowerLenticularArraysDeflect(vec3 d, vec3 intersectionPoint, vec3 principalPoint00, float cosAlpha, float sinAlpha, float dPdUV) {
+			vec3 crossedLinearPowerLenticularArraysDeflect(vec3 d, vec3 intersectionPoint, vec3 principalPoint00, float dPdI) {
 				vec2 r = intersectionPoint.xy - principalPoint00.xy;
 
-				// transform r into the uv coordinate system
-				vec2 rUV = r; //rotate(r, cosAlpha, -sinAlpha);
-
-				// lenslet centre, in the uv coordinate system aligned with the array vectors
-				vec2 lensletCentreUV = vec2(
-					findLensletCentreCoordinate(rUV.x, period),
-					findLensletCentreCoordinate(rUV.y, period)
+				// lenslet index
+				vec2 lensletIndices = vec2(
+					findLensletIndex(r.x, period),
+					findLensletIndex(r.y, period)
 				);
 
 				// calculate the tangential direction change
-				vec2 localRUV = rUV - lensletCentreUV;
-				vec2 deltaUV = -localRUV*dPdUV*rUV;
-				// the second term, proportional to -0.5*dPdUV*uuN^2 (or vvN^2) is for one part of a Lohmann cylindrical lens --
-				// see PhaseHologramOfLohmannCylindricalLensPart::getTangentialDirectionComponentChangeTransmissive
+				vec2 localR = r - 0.5*period*lensletIndices;	// a 2D vector from the principal point to the intersection point
+				vec2 delta = -localR*dPdI*lensletIndices;
 		
 				// transform the lenslet centre into the xy coordinate system
-				vec2 dxy = d.xy/length(d) + deltaUV; //rotate(deltaUV, cosAlpha, sinAlpha);
+				vec2 dxy = d.xy/length(d) + delta;
 
 				// from the transverse direction, construct a 3D vector by setting the z component such that the length
 				// of the vector is 1
@@ -861,10 +866,7 @@ function addRaytracingSphere() {
 				inout vec4 b,
 				vec3 centreOfArray, 
 				float radius,
-				float cosAlpha,
-				float sinAlpha,
-				float dPdUV,
-				float overallF
+				float dPdI
 			) {
 				bool isForward;
 				propagateForwardToZPlane(p, d, centreOfArray.z, isForward);
@@ -880,8 +882,7 @@ function addRaytracingSphere() {
 
 						// deflect the light-ray direction accordingly 
 
-						d = crossedLinearPowerLenticularArraysDeflect(d, p, centreOfArray, cosAlpha, sinAlpha, dPdUV);
-						//d = lensDeflect(d, pixy, overallF);
+						d = crossedLinearPowerLenticularArraysDeflect(d, p, centreOfArray, dPdI);
 
 						// lower the brightness factor, giving the light a blue tinge
 						b *= vec4(0.9, 0.9, 0.99, 1);
@@ -889,37 +890,6 @@ function addRaytracingSphere() {
 				} // else b *= vec4(0.99, 0.9, 0.9, 1);	// this shouldn't happen -- give the light a red tinge
 			}
 				
-			void passThroughLensArray(
-				inout vec3 p, 
-				inout vec3 d, 
-				inout vec4 b,
-				vec3 centreOfArray, 
-				float radius,
-				float focalLength,
-				bool idealLens
-			) {
-				bool isForward;
-				
-				propagateForwardToZPlane(p, d, centreOfArray.z, isForward);
-
-				if(isForward) {
-					vec2 cixy = p.xy - centreOfArray.xy;
-					float r2 = dot(cixy, cixy);
-					if(r2 < radius*radius) {
-						//float W = 1e-1;
-						float xIndex = floor(p.x/period+0.5);
-						float yIndex = floor(p.y/period+0.5);
-
-						lensDeflect(d,
-						p.xy - vec2(xIndex*period, yIndex*period),
-						focalLength,
-						idealLens);
-
-						b *= vec4(0.9, 0.9, 0.99, 1);
-					} 
-				}
-			}
-
 			// Pass the current ray (start point p, direction d, brightness factor b) through (or around) a lens.
 			// The (ideal thin) lens, of focal length f, is in a z plane through centreOfLens.
 			// It is circular, with the given radius, centred on centreOfLenss.
@@ -929,7 +899,7 @@ function addRaytracingSphere() {
 				inout vec4 b,
 				vec3 centreOfLens, 
 				float radius,
-				float focalLength,
+				vec2 pxy,	// the focussing powers in the x and y directions, respectively
 				bool idealLens
 			) {
 				bool isForward;
@@ -945,7 +915,7 @@ function addRaytracingSphere() {
 						// the intersection point lies inside the radius, so the lens does something to the ray
 
 						// deflect the light-ray direction accordingly and make sure that the sign of the z component remains the same
-						lensDeflect(d, pixy, focalLength, idealLens);
+						lensDeflect(d, pixy, pxy, idealLens);
 
 						// lower the brightness factor, giving the light a blue tinge
 						b *= vec4(0.9, 0.9, 0.99, 1);
@@ -1151,17 +1121,9 @@ function addRaytracingSphere() {
 					p, d, b,	// the ray
 					c,	// centreOfLens
 					radius, 
-					equivalentLensF,	// focal length
+					equivalentLensPXY,	// equivalent lens focussing powers
 					equivalentLensIdeal	// idealLens
 				);
-
-				// Will hopefully do the same as the above but return the index, x and the controlled w.
-				passThroughLensArray(
-					p, d, b,	// the ray
-					c,	// centreOfLens
-					radius, 
-					equivalentLensF,	// focal length
-					equivalentLensIdeal);
 
 				// lower the brightness factor, giving the light a blue tinge
 				b *= vec4(0.9, 0.9, 0.99, 1);
@@ -1270,14 +1232,8 @@ function addRaytracingSphere() {
 						if(showEquivalentLens) passThroughEquivalentLens(p, d, b, vec3(c1.x, c1.y, 0)); 
 						else {
 							// pass first through component 1, then component 2, then to environment-facing video feed
-							if(visible1) passThroughCrossedLinearPowerLenticularArrays(p, d, b, c1, radius, 1.0, 0.0, qAFL, 1e8);
-							//passThroughLensArray(p, d, b, c1, radius, f1, equivalentLensIdeal);
-							//passThroughSpiralLens(p, d, b, c1, phi1,  f1);
-							
-							if(visible2) passThroughCrossedLinearPowerLenticularArrays(p, d, b, c2, radius, 1.0, 0.0, -qAFL, 1e8);
-							//passThroughLensArray(p, d, b, c2, radius, -f1, equivalentLensIdeal);
-							//passThroughSpiralLens(p, d, b, c2, phi2, -f1);
-							
+							if(visible1) passThroughCrossedLinearPowerLenticularArrays(p, d, b, c1, radius, -qAFL);							
+							if(visible2) passThroughCrossedLinearPowerLenticularArrays(p, d, b, c2, radius, qAFL);
 						}
 						if(keepVideoFeedForward) 
 							color = getColorOfBackground(p, d, b, backgroundTexture, halfWidthBackground, halfHeightBackground, backgroundColour);
@@ -1288,8 +1244,8 @@ function addRaytracingSphere() {
 						if(showEquivalentLens) passThroughEquivalentLens(p, d, b, vec3(c1.x, c1.y, 0)); 
 						else {
 							// pass first through component 2, then component 1, then to user-facing video feed
-							if(visible2) passThroughSpiralLens(p, d, b, c2, phi2, -f1);
-							if(visible1) passThroughSpiralLens(p, d, b, c1, phi1,  f1);
+							if(visible2) passThroughCrossedLinearPowerLenticularArrays(p, d, b, c2, radius, qAFL);
+							if(visible1) passThroughCrossedLinearPowerLenticularArrays(p, d, b, c1, radius, -qAFL);							
 						}
 						if(keepVideoFeedForward) 
 							color = getColorOfBackground(p, d, b, backgroundTexture, halfWidthBackground, halfHeightBackground, backgroundColour);
@@ -1319,6 +1275,10 @@ function createGUI() {
 		show: function() {
 			show = (show + 1) % 6;
 			showControl.name( 'Component(s): ' + show2String() );
+		},
+		lensType: function() {
+			lensType = (lensType + 1) % 2;
+			lensControl.name( 'Lens type: ' + lensToString() );
 		},
 		// cycleShow: function() {
 		// 	show = (show + 1) % 4;
@@ -1405,6 +1365,7 @@ function createGUI() {
 
 	// const folderComponents = gui.addFolder( 'Optical components' );
 	showControl = gui.add( GUIParams, 'show' ).name( 'Component(s): ' + show2String() );
+	lensControl = gui.add( GUIParams, 'lensType' ).name( 'Lens type: ' + lensToString() );
 	// showControl.domElement.addEventListener( 'click', () => {
 	// 	show = (show + 1) % 4;
 	// 	showControl.setValue( show2String() );
@@ -1424,11 +1385,11 @@ function createGUI() {
 	// } );
 	// spiralTypeControl.disable(true);
 	// gui.add( GUIParams, 'cycleSpiralType' ).name( 'Cycle spiral type' );
-	gui.add( GUIParams, 'period', 0.001, 
-		2, 
-		0.1 )
+	gui.add( GUIParams, 'period', 0.01, 
+		0.1, 
+		0.01 )
 		.name('<i>period</i>').onChange( (period) => {raytracingSphereShaderMaterial.uniforms.period.value = period; } );
-	gui.add( GUIParams, 'qDiopterPerPeriod', -10, 10, 0.1 )
+	gui.add( GUIParams, 'qDiopterPerPeriod', -1, 1, 0.01 )
 		.name( '<i>q</i> (diopter / period)' )
 		.onChange( (qDiopterPerPeriod) => {
 			qAFL = qDiopterPerPeriod;
@@ -1437,8 +1398,8 @@ function createGUI() {
 	// 	1, 
 	// 	0.01 ).onChange( (f1) => { raytracingSphereShaderMaterial.uniforms.f1.value = f1; } );
 	deltaZControl = gui.add( GUIParams, '&Delta;<i>z</i>', deltaZMin, 0.01, 0.00001).onChange( (dz) => { deltaZ = dz; } );
-	gui.add( GUIParams, '&Delta;<i>x</i>', deltaXMin, 1, 0.001).onChange( (dx) => { deltaX = dx; } );
-	gui.add( GUIParams, '&Delta;<i>y</i>', deltaYMin, 1, 0.001).onChange( (dy) => { deltaY = dy; } );
+	gui.add( GUIParams, '&Delta;<i>x</i>', -0.3, 0.3, 0.001).onChange( (dx) => { deltaX = dx; } );
+	gui.add( GUIParams, '&Delta;<i>y</i>', -0.3, 0.3, 0.001).onChange( (dy) => { deltaY = dy; } );
 
 	// windingFocussingControl = gui.add( GUIParams, 'windingFocussing' ).name( 'Winding focussing: ' + windingFocussing2String() );	// .name( 'Winding focussing' );
 	// azimuthalPhaseCorrectionControl = gui.add( GUIParams, 'azimuthalPhaseCorrection' )
@@ -1563,6 +1524,14 @@ function show2String() {
 	}
 }
 
+function lensToString() {
+	switch(lensType) {
+		case 0: return 'Default';
+		case 1: return 'Alvarez lens';
+		default: return 'Undefined';
+	}
+}
+
 function windingFocussing2String() {
 	switch(windingFocussing) {
 	case 0: return 'None';
@@ -1666,9 +1635,12 @@ function addXRInteractivity() {
 // 	if(folderVirtualCameraClosed) folderVirtualCamera.close();
 // }
 
-// return the focal length of the Fresnel lens
-function calculateEquivalentLensF() {
-	return 1/(qAFL*deltaTheta);
+// return the focussing powers in the x and y meridians of the equivalent lens
+function calculateEquivalentLensPXY() {
+	return new THREE.Vector2(
+		qAFL * deltaX / raytracingSphereShaderMaterial.uniforms.period.value, 
+		qAFL * deltaY / raytracingSphereShaderMaterial.uniforms.period.value
+	);
 }
 
 
@@ -2148,7 +2120,7 @@ function getInfoString() {
 		`Clear-aperture radius = ${raytracingSphereShaderMaterial.uniforms.radius.value.toPrecision(4)}<br>\n` +	// radius of the Fresnel lens
 		// `<h4>Equivalent lens</h4>\n` +
 		// `Show instead of spiral Fresnel lens `+ (raytracingSphereShaderMaterial.uniforms.showEquivalentLens.value?'&check;':'&cross;')+`<br>\n` +
-		`Focal length, <i>F</i> = ${calculateEquivalentLensF().toPrecision(4)}\n` +
+		`Focussing powers, <i>P</i><sub>x,y</sub> = (${calculateEquivalentLensPXY().x.toPrecision(4)}, ${calculateEquivalentLensPXY().y.toPrecision(4)})\n` +
 		// 'Lenslet type: '+(raytracingSphereShaderMaterial.uniforms.idealLenses.value?'Ideal thin lenses':'Phase holograms') + "<br>\n" +
 		'<h4>Background</h4>\n' +
 		`Image = ` + background2String() + `<br>\n` +
